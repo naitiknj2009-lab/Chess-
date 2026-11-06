@@ -2,6 +2,9 @@ package com.nj.launcher
 
 import android.app.Activity
 import android.app.WallpaperManager
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetHostView
+import android.appwidget.AppWidgetManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -12,20 +15,27 @@ import android.view.MotionEvent
 import android.view.View
 import android.widget.EditText
 import android.widget.GridLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.TextClock
 import android.widget.TextView
 import android.widget.Toast
-import kotlin.math.abs
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : Activity() {
     private lateinit var root: LinearLayout
     private lateinit var content: LinearLayout
     private lateinit var search: EditText
+    private lateinit var widgetContainer: LinearLayout
     private var drawerOpen = false
     private var downY = 0f
     private var accent = Color.rgb(90, 110, 220)
-    private val hiddenApps by lazy { getSharedPreferences("nj_launcher", MODE_PRIVATE) }
+    private val preferences by lazy { getSharedPreferences("nj_launcher", MODE_PRIVATE) }
+    private val widgetManager by lazy { AppWidgetManager.getInstance(this) }
+    private val widgetHost by lazy { AppWidgetHost(this, APP_WIDGET_HOST_ID) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,6 +46,16 @@ class MainActivity : Activity() {
         showHome()
     }
 
+    override fun onStart() {
+        super.onStart()
+        try { widgetHost.startListening() } catch (_: Exception) { }
+    }
+
+    override fun onStop() {
+        try { widgetHost.stopListening() } catch (_: Exception) { }
+        super.onStop()
+    }
+
     private fun background(color: Int, radius: Float): GradientDrawable =
         GradientDrawable().apply { setColor(color); cornerRadius = radius }
 
@@ -44,7 +64,7 @@ class MainActivity : Activity() {
     private fun base(): LinearLayout {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(28), dp(22), dp(20))
+            setPadding(dp(22), dp(22), dp(22), dp(18))
             setBackgroundColor(Color.rgb(18, 20, 29))
         }
         setContentView(root)
@@ -53,35 +73,204 @@ class MainActivity : Activity() {
 
     private fun label(text: String, size: Float, color: Int = Color.WHITE): TextView =
         TextView(this).apply {
-            this.text = text; textSize = size; setTextColor(color)
+            this.text = text
+            textSize = size
+            setTextColor(color)
             gravity = Gravity.CENTER_VERTICAL
+        }
+
+    private fun pill(text: String, onClick: () -> Unit): TextView =
+        TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = background(0xFF292D3D.toInt(), dp(18).toFloat())
+            setPadding(dp(16), dp(13), dp(16), dp(13))
+            setOnClickListener { onClick() }
         }
 
     private fun showHome() {
         drawerOpen = false
         base()
-        root.addView(label("NJ", 22f).apply { setTextColor(accent) })
-        root.addView(label("Good day", 30f).apply { setPadding(0, dp(24), 0, dp(4)) })
-        root.addView(label("Your space. Your style.", 14f, 0xFFB8BDCC.toInt()))
-        val spacer = View(this)
-        root.addView(spacer, LinearLayout.LayoutParams(1, 0, 1f))
-        val open = TextView(this).apply {
-            text = "⌃   Swipe up to open apps"; textSize = 15f
-            gravity = Gravity.CENTER; setTextColor(Color.WHITE)
-            background = background(0xFF292D3D.toInt(), dp(24).toFloat())
-            setPadding(dp(18), dp(18), dp(18), dp(18))
-            setOnClickListener { showDrawer() }
+
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        root.addView(open, LinearLayout.LayoutParams(-1, -2))
+        top.addView(label("NJ", 23f).apply { setTextColor(accent) },
+            LinearLayout.LayoutParams(0, dp(42), 1f))
+        top.addView(pill("⚙", ::showSettings), LinearLayout.LayoutParams(dp(48), dp(42)))
+        root.addView(top)
+
+        val clock = TextClock(this).apply {
+            format12Hour = "h:mm"
+            format24Hour = "HH:mm"
+            textSize = 54f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(24), 0, 0)
+        }
+        root.addView(clock, LinearLayout.LayoutParams(-1, dp(82)))
+        val date = label(SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(Date()),
+            15f, 0xFFB8BDCC.toInt()).apply { gravity = Gravity.CENTER }
+        root.addView(date, LinearLayout.LayoutParams(-1, dp(28)))
+
+        root.addView(pill("⌕   Search apps", ::showDrawer),
+            LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(22) })
+
+        widgetContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        root.addView(widgetContainer, LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            topMargin = dp(12); bottomMargin = dp(8)
+        })
+        displaySavedWidget()
+
+        root.addView(label("Favourites", 16f).apply {
+            setPadding(dp(2), dp(6), 0, dp(8))
+        })
+        val favourites = getLaunchableApps().take(8)
+        val grid = GridLayout(this).apply { columnCount = 4; useDefaultMargins = false }
+        favourites.forEach { app -> grid.addView(createAppShortcut(app, 56, 12)) }
+        root.addView(grid, LinearLayout.LayoutParams(-1, dp(190)))
+
+        root.addView(pill("⌃   All apps", ::showDrawer),
+            LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+
         root.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> { downY = event.y; true }
                 MotionEvent.ACTION_UP -> {
                     if (downY - event.y > dp(55)) showDrawer()
+                    else if (event.y - downY > dp(90)) showDrawer()
                     true
                 }
                 else -> true
             }
+        }
+        root.alpha = 0f
+        root.animate().alpha(1f).setDuration(180).start()
+    }
+
+    private fun showSettings() {
+        val options = arrayOf("Add widget", "Remove widget", "Manage hidden apps", "About NJ Launcher")
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Launcher settings")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> pickWidget()
+                    1 -> removeWidget()
+                    2 -> showHiddenApps()
+                    3 -> android.app.AlertDialog.Builder(this)
+                        .setTitle("NJ Launcher")
+                        .setMessage("A lightweight, offline Android home screen.\nVersion 1.0")
+                        .setPositiveButton("OK", null).show()
+                }
+            }.show()
+    }
+
+    private fun pickWidget() {
+        val widgetId = widgetHost.allocateAppWidgetId()
+        val pickIntent = Intent(AppWidgetManager.ACTION_APPWIDGET_PICK).apply {
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
+        }
+        try {
+            startActivityForResult(pickIntent, REQUEST_PICK_WIDGET)
+        } catch (_: Exception) {
+            widgetHost.deleteAppWidgetId(widgetId)
+            Toast.makeText(this, "Widget picker is unavailable", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun removeWidget() {
+        val widgetId = preferences.getInt(KEY_WIDGET_ID, -1)
+        if (widgetId != -1) {
+            widgetHost.deleteAppWidgetId(widgetId)
+            preferences.edit().remove(KEY_WIDGET_ID).apply()
+            if (!drawerOpen) showHome()
+        } else {
+            Toast.makeText(this, "No widget added", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun displaySavedWidget() {
+        widgetContainer.removeAllViews()
+        val widgetId = preferences.getInt(KEY_WIDGET_ID, -1)
+        if (widgetId == -1) {
+            widgetContainer.addView(label("Make this space yours", 14f, 0xFF9298AA.toInt()).apply {
+                gravity = Gravity.CENTER
+            })
+            widgetContainer.addView(pill("+  Add a widget", ::pickWidget),
+                LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(12) })
+            return
+        }
+        try {
+            val info = widgetManager.getAppWidgetInfo(widgetId)
+            if (info == null) {
+                preferences.edit().remove(KEY_WIDGET_ID).apply()
+                displaySavedWidget()
+                return
+            }
+            val hostView: AppWidgetHostView = widgetHost.createView(this, widgetId, info)
+            hostView.setAppWidget(widgetId, info)
+            widgetContainer.addView(hostView, LinearLayout.LayoutParams(-1, -2))
+        } catch (_: Exception) {
+            widgetContainer.addView(pill("Widget unavailable · Remove", ::removeWidget))
+        }
+    }
+
+    @Deprecated("Deprecated in Android API")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_PICK_WIDGET) {
+            val widgetId = data?.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1) ?: -1
+            if (resultCode == RESULT_OK && widgetId != -1) {
+                preferences.edit().putInt(KEY_WIDGET_ID, widgetId).apply()
+            } else {
+                val allocated = data?.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1) ?: -1
+                if (allocated != -1) widgetHost.deleteAppWidgetId(allocated)
+            }
+            showHome()
+        }
+    }
+
+    private fun getLaunchableApps() = packageManager
+        .getInstalledApplications(PackageManager.GET_META_DATA)
+        .filter { packageManager.getLaunchIntentForPackage(it.packageName) != null }
+        .filter { it.packageName != packageName && !preferences.getBoolean(it.packageName, false) }
+        .sortedBy { packageManager.getApplicationLabel(it).toString().lowercase() }
+
+    private fun createAppShortcut(app: android.content.pm.ApplicationInfo, iconSize: Int, textSize: Int): View {
+        val pm = packageManager
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(3), dp(7), dp(3), dp(7))
+            setOnClickListener {
+                pm.getLaunchIntentForPackage(app.packageName)?.let { startActivity(it) }
+            }
+            setOnLongClickListener {
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle(pm.getApplicationLabel(app))
+                    .setItems(arrayOf("Hide app", "Cancel")) { _, which ->
+                        if (which == 0) {
+                            preferences.edit().putBoolean(app.packageName, true).apply()
+                            if (drawerOpen) renderApps(search.text.toString()) else showHome()
+                        }
+                    }.show()
+                true
+            }
+            addView(ImageView(this@MainActivity).apply {
+                setImageDrawable(pm.getApplicationIcon(app))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }, LinearLayout.LayoutParams(dp(iconSize), dp(iconSize)))
+            addView(label(pm.getApplicationLabel(app).toString(), textSize.toFloat()).apply {
+                gravity = Gravity.CENTER
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(-1, dp(26)))
         }
     }
 
@@ -90,12 +279,17 @@ class MainActivity : Activity() {
         base()
         root.addView(label("All apps", 28f))
         search = EditText(this).apply {
-            hint = "Search apps"; setSingleLine(true); textSize = 16f
-            setTextColor(Color.WHITE); setHintTextColor(0xFF9298AA.toInt())
+            hint = "Search apps"
+            setSingleLine(true)
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setHintTextColor(0xFF9298AA.toInt())
             background = background(0xFF292D3D.toInt(), dp(18).toFloat())
             setPadding(dp(16), dp(10), dp(16), dp(10))
         }
-        root.addView(search, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(16); bottomMargin = dp(12) })
+        root.addView(search, LinearLayout.LayoutParams(-1, dp(52)).apply {
+            topMargin = dp(16); bottomMargin = dp(12)
+        })
         content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val scroll = ScrollView(this).apply { addView(content) }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -106,75 +300,57 @@ class MainActivity : Activity() {
             if (event.action == MotionEvent.ACTION_UP && event.y - downY > dp(70)) showHome()
             true
         }
+        root.alpha = 0f
+        root.animate().alpha(1f).setDuration(160).start()
     }
 
     private fun renderApps(query: String) {
         content.removeAllViews()
-        val pm = packageManager
-        val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
-            .filter { it.packageName != packageName && !hiddenApps.getBoolean(it.packageName, false) }
-            .filter { pm.getApplicationLabel(it).toString().contains(query, true) }
-            .sortedBy { pm.getApplicationLabel(it).toString().lowercase() }
-
+        val apps = getLaunchableApps().filter {
+            packageManager.getApplicationLabel(it).toString().contains(query, true)
+        }
         val grid = GridLayout(this).apply { columnCount = 4; useDefaultMargins = false }
         apps.forEach { app ->
-            val item = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-                setPadding(dp(4), dp(12), dp(4), dp(12))
-                setOnClickListener {
-                    pm.getLaunchIntentForPackage(app.packageName)?.let { startActivity(it) }
-                }
-                setOnLongClickListener {
-                    android.app.AlertDialog.Builder(this@MainActivity)
-                        .setTitle(pm.getApplicationLabel(app))
-                        .setItems(arrayOf("Hide app", "Cancel")) { dialog, which ->
-                            if (which == 0) {
-                                hiddenApps.edit().putBoolean(app.packageName, true).apply()
-                                renderApps(search.text.toString())
-                            }
-                        }.show()
-                    true
-                }
-            }
-            val icon = android.widget.ImageView(this).apply {
-                setImageDrawable(pm.getApplicationIcon(app))
-                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
-            }
-            item.addView(icon, LinearLayout.LayoutParams(dp(48), dp(48)))
-            item.addView(label(pm.getApplicationLabel(app).toString(), 11f).apply {
-                gravity = Gravity.CENTER; maxLines = 2
-            }, LinearLayout.LayoutParams(-1, dp(36)))
-            grid.addView(item, GridLayout.LayoutParams().apply {
-                width = 0; height = dp(100); columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+            grid.addView(createAppShortcut(app, 48, 11), GridLayout.LayoutParams().apply {
+                width = 0
+                height = dp(100)
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
             })
         }
         content.addView(grid)
         if (apps.isEmpty()) content.addView(label("No apps found", 15f, 0xFFB8BDCC.toInt()))
-        val unhide = TextView(this).apply {
-            text = "Manage hidden apps"; gravity = Gravity.CENTER; setTextColor(accent)
+        content.addView(TextView(this).apply {
+            text = "Manage hidden apps"
+            gravity = Gravity.CENTER
+            setTextColor(accent)
             setPadding(0, dp(18), 0, dp(18))
             setOnClickListener { showHiddenApps() }
-        }
-        content.addView(unhide)
+        })
     }
 
     private fun showHiddenApps() {
-        val pm = packageManager
-        val hidden = pm.getInstalledApplications(0).filter { hiddenApps.getBoolean(it.packageName, false) }
-        val names = hidden.map { pm.getApplicationLabel(it).toString() }.toTypedArray()
+        val hidden = packageManager.getInstalledApplications(0)
+            .filter { preferences.getBoolean(it.packageName, false) }
+        val names = hidden.map { packageManager.getApplicationLabel(it).toString() }.toTypedArray()
         if (names.isEmpty()) {
-            Toast.makeText(this, "No hidden apps", Toast.LENGTH_SHORT).show(); return
+            Toast.makeText(this, "No hidden apps", Toast.LENGTH_SHORT).show()
+            return
         }
         android.app.AlertDialog.Builder(this).setTitle("Hidden apps")
             .setItems(names) { _, which ->
-                hiddenApps.edit().putBoolean(hidden[which].packageName, false).apply()
-                renderApps(search.text.toString())
+                preferences.edit().putBoolean(hidden[which].packageName, false).apply()
+                if (drawerOpen) renderApps(search.text.toString()) else showHome()
             }.setNegativeButton("Close", null).show()
     }
 
     @Deprecated("Deprecated in Android API")
     override fun onBackPressed() {
         if (drawerOpen) showHome() else super.onBackPressed()
+    }
+
+    companion object {
+        private const val APP_WIDGET_HOST_ID = 2048
+        private const val REQUEST_PICK_WIDGET = 4102
+        private const val KEY_WIDGET_ID = "home_widget_id"
     }
 }
