@@ -138,8 +138,10 @@ class MainActivity : Activity() {
         root.addView(label("Favourites", 16f).apply {
             setPadding(dp(2), dp(6), 0, dp(8))
         })
-        val favourites = getLaunchableApps().take(8)
-        val grid = GridLayout(this).apply { columnCount = 4; useDefaultMargins = false }
+        val pinned = preferences.getStringSet(KEY_FAVOURITES, emptySet())?.toSet().orEmpty()
+        val allApps = getLaunchableApps()
+        val favourites = if (pinned.isEmpty()) allApps.take(8) else allApps.filter { pinned.contains(it.packageName) }.take(12)
+        val grid = GridLayout(this).apply { columnCount = preferences.getInt(KEY_GRID_COLUMNS, 4); useDefaultMargins = false }
         favourites.forEach { app -> grid.addView(createAppShortcut(app, 56, 12)) }
         root.addView(grid, LinearLayout.LayoutParams(-1, dp(190)))
 
@@ -151,7 +153,7 @@ class MainActivity : Activity() {
                 MotionEvent.ACTION_DOWN -> { downY = event.y; true }
                 MotionEvent.ACTION_UP -> {
                     if (downY - event.y > dp(55)) showDrawer()
-                    else if (event.y - downY > dp(90)) showDrawer()
+                    else if (event.y - downY > dp(90)) showSettings()
                     true
                 }
                 else -> true
@@ -162,7 +164,7 @@ class MainActivity : Activity() {
     }
 
     private fun showSettings() {
-        val options = arrayOf("Add widget", "Remove widget", "Choose icon pack", "Manage hidden apps", "About NJ Launcher")
+        val options = arrayOf("Add widget", "Remove widget", "Choose icon pack", "Home grid size", "Manage hidden apps", "About NJ Launcher")
         android.app.AlertDialog.Builder(this)
             .setTitle("Launcher settings")
             .setItems(options) { _, which ->
@@ -170,8 +172,9 @@ class MainActivity : Activity() {
                     0 -> pickWidget()
                     1 -> removeWidget()
                     2 -> showIconPackPicker()
-                    3 -> showHiddenApps()
-                    4 -> android.app.AlertDialog.Builder(this)
+                    3 -> showGridPicker()
+                    4 -> showHiddenApps()
+                    5 -> android.app.AlertDialog.Builder(this)
                         .setTitle("NJ Launcher")
                         .setMessage("A lightweight, offline Android home screen.\nVersion 1.0")
                         .setPositiveButton("OK", null).show()
@@ -260,12 +263,23 @@ class MainActivity : Activity() {
                 pm.getLaunchIntentForPackage(app.packageName)?.let { startActivity(it) }
             }
             setOnLongClickListener {
+                val pinnedApps = preferences.getStringSet(KEY_FAVOURITES, emptySet())?.toMutableSet() ?: mutableSetOf()
+                val alreadyPinned = pinnedApps.contains(app.packageName)
+                val actions = if (alreadyPinned) arrayOf("Remove from favourites", "Hide app", "Cancel")
+                    else arrayOf("Add to favourites", "Hide app", "Cancel")
                 android.app.AlertDialog.Builder(this@MainActivity)
                     .setTitle(pm.getApplicationLabel(app))
-                    .setItems(arrayOf("Hide app", "Cancel")) { _, which ->
-                        if (which == 0) {
-                            preferences.edit().putBoolean(app.packageName, true).apply()
-                            if (drawerOpen) renderApps(search.text.toString()) else showHome()
+                    .setItems(actions) { _, which ->
+                        when (which) {
+                            0 -> {
+                                if (alreadyPinned) pinnedApps.remove(app.packageName) else pinnedApps.add(app.packageName)
+                                preferences.edit().putStringSet(KEY_FAVOURITES, pinnedApps).apply()
+                                if (drawerOpen) renderApps(search.text.toString()) else showHome()
+                            }
+                            1 -> {
+                                preferences.edit().putBoolean(app.packageName, true).apply()
+                                if (drawerOpen) renderApps(search.text.toString()) else showHome()
+                            }
                         }
                     }.show()
                 true
@@ -282,6 +296,22 @@ class MainActivity : Activity() {
         }
     }
 
+
+
+    private fun showGridPicker() {
+        val columns = intArrayOf(3, 4, 5, 6)
+        val labels = columns.map { "$it columns" }.toTypedArray()
+        val current = preferences.getInt(KEY_GRID_COLUMNS, 4)
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Home grid")
+            .setSingleChoiceItems(labels, columns.indexOf(current)) { dialog, which ->
+                preferences.edit().putInt(KEY_GRID_COLUMNS, columns[which]).apply()
+                dialog.dismiss()
+                showHome()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
 
     private fun findIconPacks(): List<Pair<String, String>> {
         return try {
@@ -393,7 +423,7 @@ class MainActivity : Activity() {
         val apps = getLaunchableApps().filter {
             packageManager.getApplicationLabel(it).toString().contains(query, true)
         }
-        val grid = GridLayout(this).apply { columnCount = 4; useDefaultMargins = false }
+        val grid = GridLayout(this).apply { columnCount = preferences.getInt(KEY_GRID_COLUMNS, 4); useDefaultMargins = false }
         apps.forEach { app ->
             grid.addView(createAppShortcut(app, 48, 11), GridLayout.LayoutParams().apply {
                 width = 0
@@ -437,5 +467,7 @@ class MainActivity : Activity() {
         private const val REQUEST_PICK_WIDGET = 4102
         private const val KEY_WIDGET_ID = "home_widget_id"
         private const val KEY_ICON_PACK = "icon_pack_package"
+        private const val KEY_GRID_COLUMNS = "home_grid_columns"
+        private const val KEY_FAVOURITES = "favourite_apps"
     }
 }
