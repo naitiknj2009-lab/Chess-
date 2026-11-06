@@ -30,7 +30,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         accent = try {
-            val colors = WallpaperManager.getInstance(this). wallpaperColors
+            val colors = WallpaperManager.getInstance(this).getWallpaperColors(WallpaperManager.FLAG_SYSTEM)
             colors?.primaryColor?.toArgb() ?: accent
         } catch (_: Exception) { accent }
         showHome()
