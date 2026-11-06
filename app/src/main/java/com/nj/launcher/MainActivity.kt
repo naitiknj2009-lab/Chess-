@@ -7,12 +7,14 @@ import android.appwidget.AppWidgetHostView
 import android.appwidget.AppWidgetManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.util.Xml
 import android.widget.EditText
 import android.widget.GridLayout
 import android.widget.ImageView
@@ -24,6 +26,7 @@ import android.widget.Toast
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import org.xmlpull.v1.XmlPullParser
 
 class MainActivity : Activity() {
     private lateinit var root: LinearLayout
@@ -36,6 +39,9 @@ class MainActivity : Activity() {
     private val preferences by lazy { getSharedPreferences("nj_launcher", MODE_PRIVATE) }
     private val widgetManager by lazy { AppWidgetManager.getInstance(this) }
     private val widgetHost by lazy { AppWidgetHost(this, APP_WIDGET_HOST_ID) }
+    private var iconPackPackage: String? = null
+    private var iconPackResources: Resources? = null
+    private val iconMappings = mutableMapOf<String, String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +49,7 @@ class MainActivity : Activity() {
             val colors = WallpaperManager.getInstance(this).getWallpaperColors(WallpaperManager.FLAG_SYSTEM)
             colors?.primaryColor?.toArgb() ?: accent
         } catch (_: Exception) { accent }
+        loadSelectedIconPack()
         showHome()
     }
 
@@ -155,15 +162,16 @@ class MainActivity : Activity() {
     }
 
     private fun showSettings() {
-        val options = arrayOf("Add widget", "Remove widget", "Manage hidden apps", "About NJ Launcher")
+        val options = arrayOf("Add widget", "Remove widget", "Choose icon pack", "Manage hidden apps", "About NJ Launcher")
         android.app.AlertDialog.Builder(this)
             .setTitle("Launcher settings")
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> pickWidget()
                     1 -> removeWidget()
-                    2 -> showHiddenApps()
-                    3 -> android.app.AlertDialog.Builder(this)
+                    2 -> showIconPackPicker()
+                    3 -> showHiddenApps()
+                    4 -> android.app.AlertDialog.Builder(this)
                         .setTitle("NJ Launcher")
                         .setMessage("A lightweight, offline Android home screen.\nVersion 1.0")
                         .setPositiveButton("OK", null).show()
@@ -263,7 +271,7 @@ class MainActivity : Activity() {
                 true
             }
             addView(ImageView(this@MainActivity).apply {
-                setImageDrawable(pm.getApplicationIcon(app))
+                setImageDrawable(getAppIcon(app))
                 scaleType = ImageView.ScaleType.FIT_CENTER
             }, LinearLayout.LayoutParams(dp(iconSize), dp(iconSize)))
             addView(label(pm.getApplicationLabel(app).toString(), textSize.toFloat()).apply {
@@ -272,6 +280,82 @@ class MainActivity : Activity() {
                 ellipsize = android.text.TextUtils.TruncateAt.END
             }, LinearLayout.LayoutParams(-1, dp(26)))
         }
+    }
+
+
+    private fun findIconPacks(): List<Pair<String, String>> {
+        return try {
+            packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
+                .filter { it.packageName != packageName }
+                .mapNotNull { app ->
+                    val packResources = try { packageManager.getResourcesForApplication(app.packageName) }
+                    catch (_: Exception) { null }
+                    val xmlId = packResources?.getIdentifier("appfilter", "xml", app.packageName) ?: 0
+                    if (xmlId == 0) null else Pair(
+                        app.packageName,
+                        packageManager.getApplicationLabel(app).toString()
+                    )
+                }.sortedBy { it.second.lowercase() }
+        } catch (_: Exception) { emptyList() }
+    }
+
+    private fun showIconPackPicker() {
+        val packs = findIconPacks()
+        val options = listOf("System icons") + packs.map { it.second }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Icon pack")
+            .setItems(options.toTypedArray()) { _, which ->
+                val selected = if (which == 0) null else packs[which - 1].first
+                if (selected == null) preferences.edit().remove(KEY_ICON_PACK).apply()
+                else preferences.edit().putString(KEY_ICON_PACK, selected).apply()
+                loadSelectedIconPack()
+                if (drawerOpen) renderApps(search.text.toString()) else showHome()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun loadSelectedIconPack() {
+        iconMappings.clear()
+        iconPackPackage = null
+        iconPackResources = null
+        val pack = preferences.getString(KEY_ICON_PACK, null) ?: return
+        try {
+            val packResources = packageManager.getResourcesForApplication(pack)
+            val xmlId = packResources.getIdentifier("appfilter", "xml", pack)
+            if (xmlId == 0) return
+            val parser = packResources.getXml(xmlId)
+            while (parser.eventType != XmlPullParser.END_DOCUMENT) {
+                if (parser.eventType == XmlPullParser.START_TAG && parser.name == "item") {
+                    val component = parser.getAttributeValue(null, "component").orEmpty()
+                    val drawable = parser.getAttributeValue(null, "drawable").orEmpty()
+                    val targetPackage = component.substringAfter("{", component).substringBefore("/")
+                    if (targetPackage.isNotBlank() && drawable.isNotBlank()) {
+                        iconMappings[targetPackage] = drawable
+                    }
+                }
+                parser.next()
+            }
+            parser.close()
+            iconPackPackage = pack
+            iconPackResources = packResources
+        } catch (_: Exception) {
+            Toast.makeText(this, "Could not load this icon pack", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun getAppIcon(app: android.content.pm.ApplicationInfo): android.graphics.drawable.Drawable {
+        val packResources = iconPackResources
+        val pack = iconPackPackage
+        val drawableName = iconMappings[app.packageName]
+        if (packResources != null && pack != null && drawableName != null) {
+            try {
+                var drawableId = packResources.getIdentifier(drawableName, "drawable", pack)
+                if (drawableId == 0) drawableId = packResources.getIdentifier(drawableName, "mipmap", pack)
+                if (drawableId != 0) return packResources.getDrawable(drawableId, theme)
+            } catch (_: Exception) { }
+        }
+        return packageManager.getApplicationIcon(app)
     }
 
     private fun showDrawer() {
@@ -352,5 +436,6 @@ class MainActivity : Activity() {
         private const val APP_WIDGET_HOST_ID = 2048
         private const val REQUEST_PICK_WIDGET = 4102
         private const val KEY_WIDGET_ID = "home_widget_id"
+        private const val KEY_ICON_PACK = "icon_pack_package"
     }
 }
